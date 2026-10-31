@@ -1,4 +1,5 @@
-import { WebsiteLink, PortalProfile } from '../types';
+import { WebsiteLink, PortalProfile } from '../types/index.ts';
+
 
 type Listener<T> = (data: T) => void;
 

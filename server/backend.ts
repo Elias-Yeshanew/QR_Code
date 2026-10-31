@@ -2,8 +2,9 @@ import express, { Request, Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebsiteLink, PortalProfile } from '../src/types';
-import { INITIAL_PROFILE } from '../src/db/inMemoryDb';
+import { WebsiteLink, PortalProfile } from '../src/types/index.ts';
+import { INITIAL_PROFILE } from '../src/db/inMemoryDb.ts';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -2,7 +2,8 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
-import { apiApp } from './server/backend';
+import { apiApp } from './server/backend.ts';
+
 
 export default defineConfig(() => {
   return {
