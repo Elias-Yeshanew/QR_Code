@@ -1,0 +1,6 @@
+{
+  "name": "ScanLink - QR Smart Landing Portal",
+  "description": "A fast, responsive QR landing page directory allowing users to scan a QR code and immediately access and navigate curated websites, social profiles, and resources.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
