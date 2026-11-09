@@ -1,27 +1,33 @@
+import 'dotenv/config';
 import express from 'express';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { apiRouter } from './backend';
+import { createApi } from './backend.ts';
+import { createStore } from './store.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const app = express();
+const rootDir = path.resolve(import.meta.dirname, '..');
+const distDir = path.join(rootDir, 'dist');
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-// Mount Central Backend API
-app.use('/api', apiRouter);
+const store = createStore(rootDir);
+await store.init();
 
-// Serve built frontend assets in production
-const distDir = path.resolve(__dirname, '../dist');
-app.use(express.static(distDir));
+const app = createApi(store);
 
-// Fallback to index.html for SPA routes
+// Built frontend. Hashed assets can be cached; index.html must not be.
+app.use(express.static(distDir, { index: false, maxAge: '1y', immutable: true }));
 app.get('*', (_req, res) => {
+  res.set('Cache-Control', 'no-cache');
   res.sendFile(path.join(distDir, 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Card Backend] Central server running at http://0.0.0.0:${PORT}`);
-  console.log(`[Card Backend] API accessible at http://0.0.0.0:${PORT}/api/card`);
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[Card Backend] Listening on http://0.0.0.0:${PORT}`);
 });
+
+const shutdown = () => {
+  server.close(() => {
+    store.close().finally(() => process.exit(0));
+  });
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

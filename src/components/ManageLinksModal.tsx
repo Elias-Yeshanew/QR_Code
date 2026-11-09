@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { WebsiteLink, PortalProfile, ThemeType, SocialLink } from '../types';
 import { validateUrl, normalizeUrl } from '../utils/linkStorage';
-import { db } from '../db/inMemoryDb';
+import { db } from '../db/cardStore';
 import { SaphireLogo } from './SaphireLogo';
 
 interface ManageLinksModalProps {
@@ -75,8 +75,13 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
   const [socialX, setSocialX] = useState('');
 
   // Admin PIN management
+  const [currentPin, setCurrentPin] = useState('');
   const [newPin, setNewPin] = useState('');
-  const [pinFeedback, setPinFeedback] = useState('');
+  const [pinFeedback, setPinFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // Server errors from saves/deletes, and in-flight state for submit buttons
+  const [actionError, setActionError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   // Load link for editing
   const loadLinkForEditing = (link: WebsiteLink) => {
@@ -142,10 +147,15 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleLinkSubmit = (e: React.FormEvent) => {
+  const showActionError = (err: unknown) => {
+    setActionError(err instanceof Error ? err.message : 'Something went wrong. Please try again.');
+  };
+
+  const handleLinkSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
     setFormSuccess('');
+    setActionError('');
 
     if (!title.trim()) {
       setFormError('Please enter a website or destination title.');
@@ -156,71 +166,79 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
       return;
     }
 
-    if (currentEditId) {
-      // Update existing link
-      const updated = db.updateLink(currentEditId, {
-        title: title.trim(),
-        url: normalizeUrl(url),
-        description: description.trim() || 'Tap to visit website',
-        category: category.trim() || 'General',
-        icon: icon || 'globe',
-        badge: badge.trim() || undefined,
-        featured,
-      });
+    const existing = currentEditId ? db.getLinkById(currentEditId) : undefined;
+    if (currentEditId && !existing) {
+      setFormError('Failed to update link. Record not found.');
+      return;
+    }
 
-      if (updated) {
-        if (onUpdateLinks) onUpdateLinks(db.getLinks());
-        setFormSuccess('Link successfully updated in in-memory database!');
-        setTimeout(() => {
-          setFormSuccess('');
-          resetLinkForm();
-          setActiveTab('list');
-        }, 1200);
-      } else {
-        setFormError('Failed to update link. Record not found.');
-      }
+    const record = {
+      id: existing?.id ?? `link-${Date.now()}`,
+      title: title.trim(),
+      url: normalizeUrl(url),
+      description: description.trim() || 'Tap to visit website',
+      category: category.trim() || 'General',
+      icon: icon || 'globe',
+      badge: badge.trim() || undefined,
+      featured,
+      accentColor: existing?.accentColor,
+      createdAt: existing?.createdAt ?? Date.now(),
+    };
+
+    setIsSaving(true);
+    try {
+      await db.saveLink(record);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Could not save the link.');
+      return;
+    } finally {
+      setIsSaving(false);
+    }
+
+    if (onUpdateLinks) onUpdateLinks(db.getLinks());
+    if (existing) {
+      setFormSuccess('Link updated and saved.');
+      setTimeout(() => {
+        setFormSuccess('');
+        resetLinkForm();
+        setActiveTab('list');
+      }, 1200);
     } else {
-      // Add new link
-      const newLink: WebsiteLink = {
-        id: `link-${Date.now()}`,
-        title: title.trim(),
-        url: normalizeUrl(url),
-        description: description.trim() || 'Tap to visit website',
-        category: category.trim() || 'General',
-        icon: icon || 'globe',
-        clicks: 0,
-        featured,
-        badge: badge.trim() || undefined,
-        createdAt: Date.now(),
-      };
-
-      db.insertLink(newLink);
-      if (onUpdateLinks) onUpdateLinks(db.getLinks());
-
       resetLinkForm();
-      setFormSuccess('Link created and stored in in-memory database!');
+      setFormSuccess('Link added and saved.');
       setTimeout(() => setFormSuccess(''), 2500);
     }
   };
 
-  const handleDeleteLink = (id: string) => {
-    db.deleteLink(id);
+  const handleDeleteLink = async (id: string) => {
+    setActionError('');
+    try {
+      await db.deleteLink(id);
+    } catch (err) {
+      showActionError(err);
+      return;
+    }
     if (onUpdateLinks) onUpdateLinks(db.getLinks());
     if (currentEditId === id) {
       resetLinkForm();
     }
   };
 
-  const handleToggleFeatured = (id: string) => {
+  const handleToggleFeatured = async (id: string) => {
     const item = db.getLinkById(id);
-    if (item) {
-      db.updateLink(id, { featured: !item.featured });
+    if (!item) return;
+    setActionError('');
+    try {
+      await db.saveLink({ ...item, featured: !item.featured });
       if (onUpdateLinks) onUpdateLinks(db.getLinks());
+    } catch (err) {
+      showActionError(err);
     }
   };
 
-  const handleSaveProfile = (e: React.FormEvent) => {
+  const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    setActionError('');
 
     // Construct social array
     const updatedSocials: SocialLink[] = [];
@@ -256,24 +274,52 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
       });
     }
 
-    const updated = db.updateProfile({
-      title: profileTitle.trim() || 'Alex Morgan',
-      tagline: profileTagline.trim(),
-      avatarUrl: profileAvatarUrl.trim(),
-      bio: profileBio.trim(),
-      theme: profileTheme,
-      socials: updatedSocials,
-    });
-
-    if (onUpdateProfile) onUpdateProfile(updated);
-    setProfileSaved(true);
-    setTimeout(() => setProfileSaved(false), 2000);
+    setIsSaving(true);
+    try {
+      const updated = await db.saveProfile({
+        title: profileTitle.trim() || 'Alex Morgan',
+        tagline: profileTagline.trim(),
+        avatarUrl: profileAvatarUrl.trim() ? normalizeUrl(profileAvatarUrl.trim()) : '',
+        bio: profileBio.trim(),
+        theme: profileTheme,
+        socials: updatedSocials,
+      });
+      if (onUpdateProfile) onUpdateProfile(updated);
+      setProfileSaved(true);
+      setTimeout(() => setProfileSaved(false), 2000);
+    } catch (err) {
+      showActionError(err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleResetData = () => {
-    db.resetClean();
-    resetLinkForm();
-    if (onResetDefaults) onResetDefaults();
+  const handleChangePin = async () => {
+    setPinFeedback(null);
+    if (newPin.trim().length < 6) {
+      setPinFeedback({ ok: false, text: 'New PIN must be at least 6 characters.' });
+      return;
+    }
+    try {
+      await db.changePin(currentPin, newPin.trim());
+      setPinFeedback({ ok: true, text: 'PIN changed. Other devices will need to log in again.' });
+      setCurrentPin('');
+      setNewPin('');
+    } catch (err) {
+      setPinFeedback({ ok: false, text: err instanceof Error ? err.message : 'Could not change the PIN.' });
+    }
+  };
+
+  const handleResetData = async () => {
+    if (!window.confirm('Delete all links and reset the profile? This cannot be undone.')) return;
+    setActionError('');
+    try {
+      await db.resetContent();
+      resetLinkForm();
+      if (onResetDefaults) onResetDefaults();
+    } catch (err) {
+      showActionError(err);
+    }
   };
 
   const handleExportJson = () => {
@@ -368,6 +414,16 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
 
         {/* Scrollable Content */}
         <div className="p-5 overflow-y-auto flex-1 space-y-4">
+          {actionError && (
+            <div role="alert" className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs flex items-center gap-2 animate-in fade-in">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span className="flex-1">{actionError}</span>
+              <button type="button" onClick={() => setActionError('')} className="text-rose-300 hover:text-white cursor-pointer" aria-label="Dismiss error">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* TAB 1: ADD OR EDIT LINK */}
           {activeTab === 'add' && (
             <form onSubmit={handleLinkSubmit} className="space-y-3.5">
@@ -509,7 +565,8 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
               <div className="flex gap-2 pt-2">
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 px-4 rounded-xl text-sm font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center gap-2"
+                  disabled={isSaving}
+                  className="flex-1 py-2.5 px-4 rounded-xl text-sm font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
                 >
                   {currentEditId ? <Save className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
                   <span>{currentEditId ? 'Save Changes' : 'Add Link to Card'}</span>
@@ -531,7 +588,7 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
           {activeTab === 'list' && (
             <div className="space-y-3">
               <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-                <span>Manage {links.length} websites in in-memory store</span>
+                <span>{links.length} saved links</span>
                 <button
                   onClick={handleResetData}
                   className="text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer"
@@ -790,47 +847,38 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
                   <span>Admin Security (PIN / Password)</span>
                 </div>
                 <p className="text-[11px] text-gray-400">
-                  Only the admin can edit this card. {db.verifyAdminPin('admin123') ? (
-                    <>Default PIN is <span className="font-mono text-cyan-300">admin123</span>.</>
-                  ) : (
-                    <span className="text-emerald-400 font-medium">Your custom PIN is active and saved.</span>
-                  )}
+                  Only the admin can edit this card. Changing the PIN signs out every other device.
                 </p>
 
-                <div className="flex gap-2 pt-1">
+                <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                  <input
+                    type="password"
+                    value={currentPin}
+                    onChange={(e) => setCurrentPin(e.target.value)}
+                    placeholder="Current PIN"
+                    autoComplete="current-password"
+                    className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-white focus:border-cyan-400 outline-none font-mono"
+                  />
                   <input
                     type="password"
                     value={newPin}
                     onChange={(e) => setNewPin(e.target.value)}
-                    placeholder="Set new admin PIN..."
-                    className="flex-1 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-white focus:border-cyan-400 outline-none font-mono"
+                    placeholder="New PIN (6+ characters)"
+                    autoComplete="new-password"
+                    className="flex-1 min-w-0 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-white focus:border-cyan-400 outline-none font-mono"
                   />
                   <button
                     type="button"
-                    onClick={async () => {
-                      if (newPin.trim().length >= 3) {
-                        const success = await db.updateAdminPin(newPin.trim());
-                        if (success) {
-                          setPinFeedback('Admin password updated and saved to central server!');
-                          setNewPin('');
-                        } else {
-                          setPinFeedback('Failed to update PIN. Please verify your current PIN.');
-                        }
-                        setTimeout(() => setPinFeedback(''), 3000);
-                      } else {
-                        setPinFeedback('PIN must be at least 3 characters.');
-                        setTimeout(() => setPinFeedback(''), 2500);
-                      }
-                    }}
-                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer"
+                    onClick={handleChangePin}
+                    disabled={!currentPin || !newPin}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white transition-colors cursor-pointer disabled:opacity-50"
                   >
                     Change PIN
                   </button>
-
                 </div>
                 {pinFeedback && (
-                  <p className={`text-[11px] ${pinFeedback.includes('successfully') ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {pinFeedback}
+                  <p className={`text-[11px] ${pinFeedback.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {pinFeedback.text}
                   </p>
                 )}
               </div>
@@ -838,7 +886,8 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
               <div className="pt-2">
                 <button
                   type="submit"
-                  className="w-full py-2.5 px-4 rounded-xl text-sm font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center gap-2"
+                  disabled={isSaving}
+                  className="w-full py-2.5 px-4 rounded-xl text-sm font-semibold bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/25 transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-60"
                 >
                   <Save className="w-4 h-4" />
                   <span>Save Profile & Logo Settings</span>
@@ -852,7 +901,7 @@ export const ManageLinksModal: React.FC<ManageLinksModalProps> = ({
                   className="w-full py-2 px-3 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-gray-300 flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Export In-Memory Data (JSON)</span>
+                  <span>Export Card Data (JSON)</span>
                 </button>
               </div>
             </form>

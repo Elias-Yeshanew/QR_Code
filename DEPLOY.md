@@ -1,62 +1,47 @@
-# Deploying to Render (Step-by-Step Guide)
+# Deploying to Render
 
-This project is fully configured for zero-hassle deployment on **[Render](https://render.com/)** using the included `render.yaml` blueprint.
+The app runs as one Render **Web Service** and stores its data in **Render Postgres**.
+Data lives in the database, so it survives redeploys and free-tier restarts.
 
----
+## 1. Database
 
-### Step 1: Push your latest changes to GitHub
+Use an existing Render Postgres instance or create one (**New + → Postgres**).
+Copy its **Internal Database URL** (Postgres page → *Connections*).
 
-Open your terminal in this repository and run:
+The app creates its own schema, `saphire_card`, and touches nothing else, so it can
+share a database with other apps. On first start it creates two tables there: `settings` and `links`.
 
-```bash
-git add .
-git commit -m "Configure production backend and Render deployment"
-git push origin main
-```
+## 2. Environment variables on the web service
 
-*(Your repository is connected to: `https://github.com/Elias-Yeshanew/QR_Code.git`)*
+In the web service, open **Environment** and add:
 
----
+| Key | Value |
+| --- | --- |
+| `DATABASE_URL` | the Internal Database URL from step 1 |
+| `ADMIN_PIN` | the admin PIN you want (6+ characters) |
+| `NODE_ENV` | `production` |
 
-### Step 2: Create Web Service on Render
+`ADMIN_PIN` is only used the first time the database is set up. After that, change the PIN
+from the admin panel. If you forget it, set `ADMIN_PIN_RESET` to a new PIN, redeploy,
+log in, then delete `ADMIN_PIN_RESET`.
 
-1. Log in to **[dashboard.render.com](https://dashboard.render.com/)**.
-2. Click the **New +** button in the top right, then select **Web Service**.
-3. Choose **Build and deploy from a Git repository**.
-4. Select your repository: **`Elias-Yeshanew/QR_Code`**.
-5. Render will automatically detect the settings from `render.yaml`:
+Never commit the database URL. It contains the password.
+
+## 3. Build settings
 
 | Setting | Value |
-| :--- | :--- |
-| **Name** | `saphire-card` (or any name you prefer) |
-| **Region** | Oregon (US West) or closest to you |
-| **Branch** | `main` |
-| **Runtime** | `Node` |
-| **Build Command** | `npm install && npm run build` |
-| **Start Command** | `npm start` |
-| **Instance Type** | **Free** |
+| --- | --- |
+| Build Command | `npm install && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
 
-6. Click **Deploy Web Service**.
+(These are also in `render.yaml` if you deploy with a Blueprint.)
 
----
+## 4. Deploy
 
-### Step 3: Accessing Your Live Site & Admin
+Push to `main`. Render builds and deploys automatically.
+If `DATABASE_URL` is missing, the server refuses to start. Render then keeps the previous
+version running, and the deploy log shows the error.
 
-Once Render completes the build (takes ~1-2 minutes):
-
-- **Public Card (For Clients / QR Code Scan):**
-  `https://<your-app-name>.onrender.com`
-  *(Clean, branded, no admin buttons or icons visible).*
-
-- **Admin Management (For You Only):**
-  `https://<your-app-name>.onrender.com/admin`
-  *(Prompts for your Admin PIN to unlock full editing, link additions, and logo customization).*
-
----
-
-### Optional: Render Persistent Disk (For Paid Render Plans)
-If you are on a paid Render plan and want your `data/card_db.json` database to persist across redeployments:
-1. In Render dashboard, go to your service -> **Disks**.
-2. Add a disk with mount path `/var/data`.
-3. In **Environment Variables**, add:
-   `DATA_DIR=/var/data`
+- Public card: `https://<your-app>.onrender.com`
+- Admin: `https://<your-app>.onrender.com/admin`

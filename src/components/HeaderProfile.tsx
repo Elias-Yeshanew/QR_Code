@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { PortalProfile } from '../types';
 import { getThemeStyles } from '../utils/linkStorage';
-import { db } from '../db/inMemoryDb';
+import { db } from '../db/cardStore';
 import { SaphireLogo } from './SaphireLogo';
 
 interface HeaderProfileProps {
@@ -68,22 +68,32 @@ export const HeaderProfile: React.FC<HeaderProfileProps> = ({
     }
   };
 
+  const saveInline = async (patch: Partial<PortalProfile>, revert: () => void) => {
+    try {
+      await db.saveProfile(patch);
+    } catch (err) {
+      revert();
+      window.alert(err instanceof Error ? err.message : 'Could not save your change.');
+    }
+  };
+
   const handleSaveName = () => {
     if (!isAdmin) return;
-    const trimmed = nameInput.trim();
-    if (trimmed) {
-      db.updateProfile({ title: trimmed });
-    } else {
-      setNameInput(profile.title);
-    }
     setIsEditingName(false);
+    const trimmed = nameInput.trim();
+    if (!trimmed || trimmed === profile.title) {
+      setNameInput(profile.title);
+      return;
+    }
+    saveInline({ title: trimmed }, () => setNameInput(profile.title));
   };
 
   const handleSaveRole = () => {
     if (!isAdmin) return;
-    const trimmed = roleInput.trim();
-    db.updateProfile({ tagline: trimmed });
     setIsEditingRole(false);
+    const trimmed = roleInput.trim();
+    if (trimmed === profile.tagline) return;
+    saveInline({ tagline: trimmed }, () => setRoleInput(profile.tagline));
   };
 
   const getSocialIcon = (platform: string) => {

@@ -29,7 +29,7 @@ import {
   Settings2,
   ShieldCheck
 } from 'lucide-react';
-import { db } from './db/inMemoryDb';
+import { db } from './db/cardStore';
 import { useLinks, useProfile } from './db/useDatabase';
 import { useAdminAuth } from './db/useAdminAuth';
 
@@ -38,7 +38,7 @@ export default function App() {
   const { isAdmin, logout: handleAdminLogout } = useAdminAuth();
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState<boolean>(false);
 
-  // Reactive in-memory database subscriptions
+  // Card data from the server (cached locally for fast first paint)
   const links = useLinks();
   const profile = useProfile();
 
@@ -62,14 +62,11 @@ export default function App() {
   const checkAdminRoute = useCallback(() => {
     if (typeof window === 'undefined') return;
 
-    const pathname = window.location.pathname.toLowerCase();
-    const search = window.location.search.toLowerCase();
+    const pathname = window.location.pathname.toLowerCase().replace(/\/+$/, '');
+    const params = new URLSearchParams(window.location.search);
     const hash = window.location.hash.toLowerCase();
 
-    const isAdminUrl =
-      pathname.includes('/admin') ||
-      search.includes('admin') ||
-      hash.includes('admin');
+    const isAdminUrl = pathname === '/admin' || params.has('admin') || hash === '#admin';
 
     if (isAdminUrl) {
       if (!isAdmin) {
@@ -90,12 +87,7 @@ export default function App() {
   }, [checkAdminRoute]);
 
   const handleLinkClick = (id: string, _url: string) => {
-    db.incrementClicks(id);
-  };
-
-  const handleResetDefaults = () => {
-    if (!isAdmin) return;
-    db.resetClean();
+    db.recordClick(id);
   };
 
   const handleOpenAddLink = () => {
@@ -116,8 +108,14 @@ export default function App() {
     setIsManageModalOpen(true);
   };
 
-  const handleDeleteLink = (id: string) => {
-    db.deleteLink(id);
+  const handleDeleteLink = async (id: string) => {
+    const link = db.getLinkById(id);
+    if (!window.confirm(`Delete "${link?.title ?? 'this link'}"?`)) return;
+    try {
+      await db.deleteLink(id);
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : 'Could not delete the link.');
+    }
   };
 
   const handleExitAdmin = () => {
@@ -289,7 +287,7 @@ export default function App() {
         onClose={() => {
           setIsAdminLoginOpen(false);
           // Return URL back to / if closed without logging in
-          if (!isAdmin && typeof window !== 'undefined' && window.location.pathname.includes('/admin')) {
+          if (!isAdmin && typeof window !== 'undefined' && window.location.pathname !== '/') {
             window.history.pushState({}, '', '/');
           }
         }}
@@ -312,7 +310,6 @@ export default function App() {
           profile={profile}
           initialTab={modalTab}
           editLinkId={editingLinkId}
-          onResetDefaults={handleResetDefaults}
         />
       )}
     </div>

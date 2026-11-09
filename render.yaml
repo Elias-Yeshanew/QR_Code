@@ -3,8 +3,16 @@ services:
     name: saphire-business-card
     runtime: node
     plan: free
-    buildCommand: npm install --legacy-peer-deps && npm run build
+    buildCommand: npm install && npm run build
     startCommand: npm start
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
+      # Postgres connection string (use the Internal Database URL from Render).
+      # The app keeps its tables in its own schema ("saphire_card"), so it can share a database.
+      - key: DATABASE_URL
+        sync: false
+      # Admin PIN used the first time the app starts with an empty database (6+ characters).
+      - key: ADMIN_PIN
+        sync: false

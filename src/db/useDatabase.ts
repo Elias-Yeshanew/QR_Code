@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { db } from './inMemoryDb';
+import { db } from './cardStore';
 import { WebsiteLink, PortalProfile } from '../types';
 
 /**

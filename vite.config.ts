@@ -1,42 +1,40 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import path from 'path';
-import { defineConfig } from 'vite';
-import { apiApp } from './server/backend.ts';
+import path from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 
-
-export default defineConfig(() => {
+/** Serves the real /api backend inside the Vite dev server. Not used by `vite build`. */
+function devApi(): Plugin {
   return {
-    plugins: [
-      react(), 
-      tailwindcss(),
-      {
-        name: 'central-backend-api',
-        configureServer(server) {
-          server.middlewares.use((req, res, next) => {
-            if (req.url && req.url.startsWith('/api')) {
-              (apiApp as any)(req, res, next);
-            } else {
-              next();
-            }
-          });
-        },
-
-      },
-    ],
-
-
-    resolve: {
-      alias: {
-        '@': path.resolve(__dirname, '.'),
-      },
-    },
-    server: {
-      host: '0.0.0.0',
-      port: 3000,
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+    name: 'card-dev-api',
+    apply: 'serve',
+    async configureServer(server) {
+      await import('dotenv/config');
+      const { createStore } = await import('./server/store.ts');
+      const { createApi } = await import('./server/backend.ts');
+      const store = createStore(import.meta.dirname);
+      await store.init();
+      const api = createApi(store);
+      server.middlewares.use((req, res, next) => {
+        if (req.url?.startsWith('/api')) {
+          api(req as never, res as never, next);
+        } else {
+          next();
+        }
+      });
     },
   };
+}
+
+export default defineConfig({
+  plugins: [react(), tailwindcss(), devApi()],
+  resolve: {
+    alias: {
+      '@': path.resolve(import.meta.dirname, '.'),
+    },
+  },
+  server: {
+    host: '0.0.0.0',
+    port: 3000,
+  },
 });

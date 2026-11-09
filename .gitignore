@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Local dev storage (production uses Postgres via DATABASE_URL)
+data/

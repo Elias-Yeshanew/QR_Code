@@ -10,7 +10,6 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { useAdminAuth } from '../db/useAdminAuth';
-import { db } from '../db/inMemoryDb';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
@@ -50,8 +49,8 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
       } else {
         setError('Incorrect Admin Password / PIN. Please try again.');
       }
-    } catch {
-      setError('Connection error verifying PIN. Please try again.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection error verifying PIN. Please try again.');
     } finally {
       setIsVerifying(false);
     }
@@ -109,11 +108,8 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-gray-300 mb-1.5 flex items-center justify-between">
-              <span>Admin PIN / Password</span>
-              <span className="text-[10px] text-gray-400 font-normal">
-                {db.verifyAdminPin('admin123') ? 'Default: admin123' : 'Custom password active'}
-              </span>
+            <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+              Admin PIN / Password
             </label>
 
             <div className="relative flex items-center">

@@ -1,264 +1,159 @@
-import express, { Request, Response } from 'express';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { WebsiteLink, PortalProfile } from '../src/types/index.ts';
-import { INITIAL_PROFILE } from '../src/db/inMemoryDb.ts';
+import express, { NextFunction, Request, Response } from 'express';
+import { createSessionToken, hashPin, RateLimiter, verifyPin, verifySessionToken } from './auth.ts';
+import type { CardStore } from './store.ts';
+import { sanitizeLink, sanitizeProfilePatch, validateNewPin, ValidationError } from './validation.ts';
 
+type Handler = (req: Request, res: Response) => Promise<void>;
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Central server database file path (supports Render Persistent Disk via DATA_DIR)
-const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.resolve(__dirname, '../data');
-const DB_FILE = path.join(DATA_DIR, 'card_db.json');
-
-
-export interface ServerCardDatabase {
-  adminPin: string;
-  profile: PortalProfile;
-  links: WebsiteLink[];
-  updatedAt: number;
-}
-
-const DEFAULT_DB: ServerCardDatabase = {
-  adminPin: 'admin123',
-  profile: { ...INITIAL_PROFILE },
-  links: [],
-  updatedAt: Date.now(),
+/** Forwards async errors to the Express error handler. */
+const route = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => {
+  fn(req, res).catch(next);
 };
 
-class CentralDatabaseManager {
-  private data: ServerCardDatabase = { ...DEFAULT_DB };
-
-  constructor() {
-    this.ensureDirectory();
-    this.load();
-  }
-
-  private ensureDirectory(): void {
-    if (!fs.existsSync(DATA_DIR)) {
-      try {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      } catch (err) {
-        console.error('Failed to create data directory:', err);
-      }
-    }
-  }
-
-  private load(): void {
-    try {
-      if (fs.existsSync(DB_FILE)) {
-        const content = fs.readFileSync(DB_FILE, 'utf-8');
-        const parsed = JSON.parse(content);
-        if (parsed && typeof parsed === 'object') {
-          this.data = {
-            adminPin: parsed.adminPin || 'admin123',
-            profile: { ...INITIAL_PROFILE, ...(parsed.profile || {}) },
-            links: Array.isArray(parsed.links) ? parsed.links : [],
-            updatedAt: parsed.updatedAt || Date.now(),
-          };
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn('Could not read existing database file, initializing clean database:', err);
-    }
-
-    // If file did not exist or was invalid, initialize with clean defaults
-    this.save();
-  }
-
-  private save(): void {
-    this.ensureDirectory();
-    try {
-      this.data.updatedAt = Date.now();
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('Failed to persist central database to disk:', err);
-    }
-  }
-
-  // --- Public Read/Write Operations ---
-
-  public getPublicCardData() {
-    return {
-      profile: { ...this.data.profile },
-      links: [...this.data.links],
-      updatedAt: this.data.updatedAt,
-    };
-  }
-
-  public verifyPin(pin: string): boolean {
-    if (!pin) return false;
-    return pin.trim() === this.data.adminPin;
-  }
-
-  public updatePin(currentPin: string, newPin: string): boolean {
-    if (!this.verifyPin(currentPin)) return false;
-    if (!newPin || newPin.trim().length < 3) return false;
-    this.data.adminPin = newPin.trim();
-    this.save();
-    return true;
-  }
-
-  public updateProfile(patch: Partial<PortalProfile>): PortalProfile {
-    this.data.profile = {
-      ...this.data.profile,
-      ...patch,
-    };
-    this.save();
-    return { ...this.data.profile };
-  }
-
-  public insertOrUpdateLink(link: WebsiteLink): WebsiteLink[] {
-    const existingIndex = this.data.links.findIndex((l) => l.id === link.id);
-    if (existingIndex >= 0) {
-      this.data.links[existingIndex] = { ...this.data.links[existingIndex], ...link };
-    } else {
-      this.data.links.push({ ...link });
-    }
-    this.save();
-    return [...this.data.links];
-  }
-
-  public deleteLink(id: string): boolean {
-    const initialLen = this.data.links.length;
-    this.data.links = this.data.links.filter((l) => l.id !== id);
-    const deleted = this.data.links.length < initialLen;
-    if (deleted) {
-      this.save();
-    }
-    return deleted;
-  }
-
-  public incrementClicks(id: string): number {
-    const link = this.data.links.find((l) => l.id === id);
-    if (link) {
-      link.clicks = (link.clicks || 0) + 1;
-      this.save();
-      return link.clicks;
-    }
-    return 0;
-  }
-
-  public resetClean(): void {
-    this.data = {
-      adminPin: 'admin123',
-      profile: { ...INITIAL_PROFILE },
-      links: [],
-      updatedAt: Date.now(),
-    };
-    this.save();
-  }
+export interface ApiOptions {
+  /** Failed PIN attempts allowed per client per window. */
+  loginMaxFailures?: number;
+  loginWindowMs?: number;
 }
 
-export const serverDb = new CentralDatabaseManager();
+export function createApi(store: CardStore, options: ApiOptions = {}) {
+  const loginLimiter = new RateLimiter(options.loginMaxFailures ?? 5, options.loginWindowMs ?? 15 * 60 * 1000);
+  // One counted click per client per link every 30 seconds.
+  const clickLimiter = new RateLimiter(1, 30 * 1000);
 
-// Create Express API router
-export const apiRouter = express.Router();
-apiRouter.use(express.json());
+  const api = express.Router();
+  api.use(express.json({ limit: '32kb' }));
+  api.use((_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
 
-// Main Express app that augments req and res with Express methods
-export const apiApp = express();
-apiApp.use(express.json());
-apiApp.use('/api', apiRouter);
-apiApp.use(apiRouter);
+  const clientKey = (req: Request) => req.ip || req.socket.remoteAddress || 'unknown';
 
-
-// 1. GET /api/card - Publicly accessible by any phone or browser
-apiRouter.get('/card', (_req: Request, res: Response) => {
-  res.json(serverDb.getPublicCardData());
-});
-
-// 2. POST /api/auth/verify - Verify admin PIN
-apiRouter.post('/auth/verify', (req: Request, res: Response): void => {
-  const { pin } = req.body || {};
-  const valid = serverDb.verifyPin(pin);
-  if (valid) {
-    res.json({ success: true, message: 'Admin verified successfully' });
-  } else {
-    res.status(401).json({ success: false, message: 'Invalid Admin PIN / Password' });
-  }
-});
-
-// 3. POST /api/admin/profile - Update profile details
-apiRouter.post('/admin/profile', (req: Request, res: Response): void => {
-  const { pin, profile } = req.body || {};
-  if (!serverDb.verifyPin(pin)) {
-    res.status(401).json({ success: false, message: 'Unauthorized: Invalid Admin PIN' });
-    return;
-  }
-  if (!profile || typeof profile !== 'object') {
-    res.status(400).json({ success: false, message: 'Missing profile payload' });
-    return;
+  async function isAuthorized(req: Request): Promise<boolean> {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!token) return false;
+    const { pinHash, sessionSecret } = await store.getAuth();
+    return verifySessionToken(token, sessionSecret, pinHash);
   }
 
-  const updatedProfile = serverDb.updateProfile(profile);
-  res.json({ success: true, profile: updatedProfile });
-});
+  /** Route that requires a valid admin session token. */
+  const adminRoute = (fn: Handler) =>
+    route(async (req, res) => {
+      if (!(await isAuthorized(req))) {
+        res.status(401).json({ success: false, message: 'Session expired. Please log in again.' });
+        return;
+      }
+      await fn(req, res);
+    });
 
-// 4. POST /api/admin/links - Insert or update link
-apiRouter.post('/admin/links', (req: Request, res: Response): void => {
-  const { pin, link } = req.body || {};
-  if (!serverDb.verifyPin(pin)) {
-    res.status(401).json({ success: false, message: 'Unauthorized: Invalid Admin PIN' });
-    return;
-  }
-  if (!link || !link.id || !link.title || !link.url) {
-    res.status(400).json({ success: false, message: 'Invalid link payload' });
-    return;
-  }
+  api.get('/health', route(async (_req, res) => {
+    await store.ping();
+    res.json({ ok: true });
+  }));
 
-  const updatedLinks = serverDb.insertOrUpdateLink(link);
-  res.json({ success: true, links: updatedLinks });
-});
+  // Public card data, read by every phone that scans the QR code.
+  api.get('/card', route(async (_req, res) => {
+    res.json(await store.getCard());
+  }));
 
-// 5. DELETE /api/admin/links/:id - Delete link
-apiRouter.delete('/admin/links/:id', (req: Request, res: Response): void => {
-  const { id } = req.params;
-  const pin = (req.headers['x-admin-pin'] as string) || req.query.pin || req.body?.pin;
+  api.post('/auth/login', route(async (req, res) => {
+    const key = clientKey(req);
+    if (loginLimiter.isBlocked(key)) {
+      res.status(429).json({ success: false, message: 'Too many failed attempts. Try again in 15 minutes.' });
+      return;
+    }
+    const pin = typeof req.body?.pin === 'string' ? req.body.pin.trim() : '';
+    const { pinHash, sessionSecret } = await store.getAuth();
+    if (!pin || !verifyPin(pin, pinHash)) {
+      loginLimiter.hit(key);
+      res.status(401).json({ success: false, message: 'Incorrect admin PIN.' });
+      return;
+    }
+    loginLimiter.reset(key);
+    res.json({ success: true, token: createSessionToken(sessionSecret, pinHash) });
+  }));
 
-  if (!serverDb.verifyPin(pin)) {
-    res.status(401).json({ success: false, message: 'Unauthorized: Invalid Admin PIN' });
-    return;
-  }
+  api.get('/auth/session', adminRoute(async (_req, res) => {
+    res.json({ success: true });
+  }));
 
-  const deleted = serverDb.deleteLink(id);
-  res.json({ success: deleted, links: serverDb.getPublicCardData().links });
-});
+  api.post('/admin/profile', adminRoute(async (req, res) => {
+    const patch = sanitizeProfilePatch(req.body?.profile);
+    res.json({ success: true, profile: await store.updateProfile(patch) });
+  }));
 
-// 6. POST /api/links/:id/click - Increment public click count
-apiRouter.post('/links/:id/click', (req: Request, res: Response): void => {
-  const { id } = req.params;
-  const clicks = serverDb.incrementClicks(id);
-  res.json({ success: true, clicks });
-});
+  api.post('/admin/links', adminRoute(async (req, res) => {
+    const link = sanitizeLink(req.body?.link);
+    res.json({ success: true, links: await store.upsertLink(link) });
+  }));
 
-// 7. POST /api/admin/pin - Change admin PIN
-apiRouter.post('/admin/pin', (req: Request, res: Response): void => {
-  const { currentPin, newPin } = req.body || {};
-  if (!serverDb.verifyPin(currentPin)) {
-    res.status(401).json({ success: false, message: 'Current Admin PIN is incorrect' });
-    return;
-  }
+  api.delete('/admin/links/:id', adminRoute(async (req, res) => {
+    const deleted = await store.deleteLink(req.params.id);
+    if (!deleted) {
+      res.status(404).json({ success: false, message: 'Link not found' });
+      return;
+    }
+    res.json({ success: true, links: (await store.getCard()).links });
+  }));
 
-  const changed = serverDb.updatePin(currentPin, newPin);
-  if (changed) {
-    res.json({ success: true, message: 'Admin password updated successfully on server' });
-  } else {
-    res.status(400).json({ success: false, message: 'New PIN must be at least 3 characters' });
-  }
-});
+  api.post('/admin/pin', adminRoute(async (req, res) => {
+    const key = clientKey(req);
+    if (loginLimiter.isBlocked(key)) {
+      res.status(429).json({ success: false, message: 'Too many failed attempts. Try again in 15 minutes.' });
+      return;
+    }
+    const currentPin = typeof req.body?.currentPin === 'string' ? req.body.currentPin.trim() : '';
+    const auth = await store.getAuth();
+    if (!currentPin || !verifyPin(currentPin, auth.pinHash)) {
+      loginLimiter.hit(key);
+      res.status(403).json({ success: false, message: 'Current PIN is incorrect.' });
+      return;
+    }
+    const newHash = hashPin(validateNewPin(req.body?.newPin));
+    await store.setPinHash(newHash);
+    // Old sessions are now invalid; hand this client a fresh token.
+    res.json({ success: true, token: createSessionToken(auth.sessionSecret, newHash) });
+  }));
 
-// 8. POST /api/admin/reset - Reset to clean database
-apiRouter.post('/admin/reset', (req: Request, res: Response): void => {
-  const { pin } = req.body || {};
-  if (!serverDb.verifyPin(pin)) {
-    res.status(401).json({ success: false, message: 'Unauthorized: Invalid Admin PIN' });
-    return;
-  }
+  api.post('/admin/reset', adminRoute(async (_req, res) => {
+    await store.resetContent();
+    res.json({ success: true, ...(await store.getCard()) });
+  }));
 
-  serverDb.resetClean();
-  res.json({ success: true, ...serverDb.getPublicCardData() });
-});
+  api.post('/links/:id/click', route(async (req, res) => {
+    const key = `${clientKey(req)}|${req.params.id}`;
+    if (clickLimiter.isBlocked(key)) {
+      res.json({ success: true, counted: false });
+      return;
+    }
+    clickLimiter.hit(key);
+    const clicks = await store.incrementClicks(req.params.id);
+    res.json({ success: clicks !== null, counted: clicks !== null, clicks });
+  }));
+
+  api.use((_req, res) => {
+    res.status(404).json({ success: false, message: 'Not found' });
+  });
+
+  api.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof ValidationError) {
+      res.status(400).json({ success: false, message: err.message });
+      return;
+    }
+    const status = (err as { status?: number; type?: string })?.status;
+    if (status && status >= 400 && status < 500) {
+      res.status(status).json({ success: false, message: 'Invalid request body' });
+      return;
+    }
+    console.error('[Card Backend] Request failed:', err);
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+  });
+
+  const app = express();
+  app.set('trust proxy', 1); // Render puts one proxy in front of the app; needed for per-client rate limits.
+  app.disable('x-powered-by');
+  app.use('/api', api);
+  return app;
+}
